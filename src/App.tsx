@@ -205,20 +205,28 @@ export default function App() {
   function settle(result: HandResult) {
     if (!result.isLiuju) {
       const w = g.current.players[result.winner];
-      w.score += result.mult * 3;
-      g.current.players.forEach((p, i) => { if (i !== result.winner) p.score -= result.mult; });
+      let gain = 0;
+      g.current.players.forEach((p, i) => {
+        if (i === result.winner) return;
+        // 输家按自己亮出的赖子数再加倍：倍数 = 赢家倍数 × 2^(该输家亮赖子数)
+        const pay = result.mult * Math.pow(2, p.revealed.length);
+        p.score -= pay;
+        gain += pay;
+      });
+      w.score += gain;
       g.current.dealer = result.winner; // 赢家连庄
     }
     force();
   }
 
-  async function takeTurn(seat: number): Promise<'hu' | 'discard'> {
+  async function takeTurn(seat: number, justPonged = false): Promise<'hu' | 'discard'> {
     const p = g.current.players[seat];
     g.current.turn = seat;
     force();
 
     const tryHu = () => checkHu(huTiles(p), g.current.laizi);
-    let hu = tryHu();
+    // 碰牌后必须打出一张，不能碰完直接和
+    let hu = justPonged ? null : tryHu();
 
     if (seat === 0) {
       // 人类回合：循环处理 胡/杠/亮赖子，最后出牌
@@ -247,7 +255,7 @@ export default function App() {
           const isAdded = p.melds.some(m => m.type === 'pong' && m.tile === action.kong);
           doKong(p, action.kong);
           kongScore(seat, isAdded ? 'added' : 'dark', action.kong);
-          if (tailDraw(p)) hu = tryHu(); // 牌尾无牌则直接继续，正常出牌
+          if (!justPonged && tailDraw(p)) hu = tryHu(); // 牌尾无牌则直接继续，正常出牌；碰后的回合不许和
           continue;
         }
         if (typeof action === 'object' && 'kong3' in action) {
@@ -264,7 +272,7 @@ export default function App() {
           for (let k = 0; k < times; k++) {
             doReveal(p);
             pushLog(`${p.name} 亮出一个赖子并从牌尾补牌`);
-            if (tailDraw(p)) { hu = tryHu(); if (hu) break; }
+            if (!justPonged && tailDraw(p)) { hu = tryHu(); if (hu) break; }
             else break;
           }
           continue;
@@ -365,7 +373,7 @@ export default function App() {
     force();
   }
 
-  async function claimPhase(discarder: number, tile: number, runId: number): Promise<number | null> {
+  async function claimPhase(discarder: number, tile: number, runId: number): Promise<{ seat: number; pong: boolean } | null> {
     for (let off = 1; off <= 3; off++) {
       if (runIdRef.current !== runId) return null;
       const seat = (discarder + off) % 4;
@@ -386,7 +394,7 @@ export default function App() {
           kongScore(seat, 'ming', tile, discarder);
           force();
           tailDraw(p); // 杠后从牌尾补一张（无牌则继续，本局随即流局）
-          return seat;
+          return { seat, pong: false };
         }
       } else if (count >= 2) {
         if (seat === 0) {
@@ -399,7 +407,7 @@ export default function App() {
             p.melds.push({ type: 'pong', tile });
             pushLog(`你碰了 ${tileLabel(tile)}`);
             force();
-            return seat;
+            return { seat, pong: true };
           }
         } else {
           await sleep(400);
@@ -409,7 +417,7 @@ export default function App() {
             p.melds.push({ type: 'pong', tile });
             pushLog(`${p.name} 碰了 ${tileLabel(tile)}`);
             force();
-            return seat;
+            return { seat, pong: true };
           }
         }
       }
@@ -452,7 +460,13 @@ export default function App() {
       const claimer = await claimPhase(last.by, last.tile, runId);
       if (runIdRef.current !== runId) return;
       if (claimer !== null) {
-        current = claimer; // 碰牌者直接出牌（已 14 张）
+        current = claimer.seat;
+        if (claimer.pong) {
+          // 碰牌者直接出牌（碰后不能和，须先打一张）
+          const r2 = await takeTurn(current, true);
+          if (r2 === 'hu') { /* 理论上不可达 */ }
+          continue;
+        }
       } else {
         current = (last.by + 1) % 4;
         if (!draw(st.players[current])) { endLiuju(); return; }
@@ -708,14 +722,17 @@ function Tutorial({ open, onClose }: { open: boolean; onClose: () => void }) {
             <p>基础倍数 1，按两个因素累乘：</p>
             <p>· <b className="text-stone-100">和牌方式</b>：不带赖子（万能牌）和牌 = <b className="text-amber-300">2 倍</b>；带 1 张赖子和牌 = 1 倍。</p>
             <p>· <b className="text-stone-100">亮赖子</b>：每亮出 1 个赖子，倍数再 ×2。</p>
+            <p>· <b className="text-purple-300">输家也算自己的</b>：谁亮过赖子，谁输的时候就按 ×2^亮数 加罚——亮的赖子赢了加倍、输了也加倍。</p>
             <div className="rounded bg-emerald-900/70 p-2 text-xs space-y-1">
               <p>带赖子胡，没亮过：1 倍</p>
               <p>带赖子胡 + 亮 1 个：2 倍</p>
               <p>不带赖子胡，没亮过：2 倍</p>
               <p>不带赖子胡 + 亮 1 个：4 倍</p>
               <p>不带赖子胡 + 亮 2 个：8 倍</p>
+              <p className="text-stone-200 font-bold pt-1">输家罚分 = 赢家倍数 × 2^(自己亮赖子数)</p>
+              <p>例：对手没亮、不带赖子自摸（4 倍），你亮过 1 个赖子 → 你输 4×2 = 8 分</p>
             </div>
-            <p>赢家得 3×倍数 分，三家各扣 1×倍数 分。</p>
+            <p>赢家得各家罚分之和，各输家按自己的倍数扣。</p>
             <div className="rounded bg-emerald-900/70 p-2 text-xs space-y-1">
               <p className="text-stone-200 font-bold">杠牌计分（即时结算，流局也算）</p>
               <p>明杠（杠别人打出的牌）：点炮方给 2 分</p>
