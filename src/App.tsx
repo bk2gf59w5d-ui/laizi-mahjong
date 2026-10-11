@@ -229,12 +229,12 @@ export default function App() {
     let hu = justPonged ? null : tryHu();
 
     if (seat === 0) {
-      // 人类回合：循环处理 胡/杠/亮赖子，最后出牌
+      // 人类回合：循环处理 胡/杠/亮赖子，最后出牌；碰后的回合只能出牌
       while (true) {
-        const kongTile = findKong(p);
-        const flipTrio = findFlipTrio(p);
+        const kongTile = justPonged ? null : findKong(p); // 碰后不能杠
+        const flipTrio = justPonged ? null : findFlipTrio(p); // 碰后不能申报赖子皮杠
         const laiziCount = p.hand.filter(t => t === g.current.laizi).length;
-        const revealAvail = laiziCount >= 1; // 有赖子就可以亮（可选，不强制）
+        const revealAvail = laiziCount >= 1; // 有赖子就可以亮（碰后也可以：亮完补牌可能自摸）
         const revealTwoAvail = laiziCount >= 2; // 可以一次亮出两个
         const evals = evalDiscards(huTiles(p), g.current.laizi, p.revealed.length, 0, g.current.laiziFlip).filter(e => p.hand.includes(e.tile));
         let action: 'hu' | { kong: number } | { kong3: number } | 'reveal' | 'reveal2' | { discard: number };
@@ -255,7 +255,7 @@ export default function App() {
           const isAdded = p.melds.some(m => m.type === 'pong' && m.tile === action.kong);
           doKong(p, action.kong);
           kongScore(seat, isAdded ? 'added' : 'dark', action.kong);
-          if (!justPonged && tailDraw(p)) hu = tryHu(); // 牌尾无牌则直接继续，正常出牌；碰后的回合不许和
+          if (tailDraw(p)) hu = tryHu(); // 牌尾无牌则直接继续，正常出牌
           continue;
         }
         if (typeof action === 'object' && 'kong3' in action) {
@@ -272,7 +272,7 @@ export default function App() {
           for (let k = 0; k < times; k++) {
             doReveal(p);
             pushLog(`${p.name} 亮出一个赖子并从牌尾补牌`);
-            if (!justPonged && tailDraw(p)) { hu = tryHu(); if (hu) break; }
+            if (tailDraw(p)) { hu = tryHu(); if (hu) break; }
             else break;
           }
           continue;
@@ -290,10 +290,10 @@ export default function App() {
     } else {
       await sleep(700);
       if (hu) return 'hu';
-      // AI 杠
+      // AI 杠（碰后不能杠）
       let guard = 0;
       let wallDead = false;
-      while (!wallDead && guard++ < 4) {
+      while (!justPonged && !wallDead && guard++ < 4) {
         const kongTile = findKong(p);
         if (kongTile === null) break;
         const isAdded = p.melds.some(m => m.type === 'pong' && m.tile === kongTile);
@@ -312,8 +312,8 @@ export default function App() {
         if (!tailDraw(p)) { wallDead = true; break; }
         if (tryHu()) return 'hu';
       }
-      // AI 赖子皮三张国杠（不补牌，申报后正常出牌）
-      const flipTrioAI = findFlipTrio(p);
+      // AI 赖子皮三张国杠（不补牌，申报后正常出牌；碰后不能申报）
+      const flipTrioAI = justPonged ? null : findFlipTrio(p);
       if (flipTrioAI !== null) {
         for (let i = 0; i < 3; i++) p.hand.splice(p.hand.indexOf(flipTrioAI), 1);
         p.melds.push({ type: 'kong3', tile: flipTrioAI });
@@ -443,10 +443,12 @@ export default function App() {
     // 庄家摸牌
     if (!draw(st.players[st.dealer])) { endLiuju(); return; }
 
-    let current = st.dealer;
+    let current = st.dealer, pendingPong = false;
     while (true) {
       if (runIdRef.current !== runId) return;
-      const r = await takeTurn(current);
+      // 碰牌者的回合：碰后必须打出一张（不许和/杠/亮），打完照常进入下面的 claim 判定
+      const jp = pendingPong; pendingPong = false;
+      const r = await takeTurn(current, jp);
       if (r === 'hu') {
         const result = huResult(st.players[current], current);
         settle(result);
@@ -461,12 +463,7 @@ export default function App() {
       if (runIdRef.current !== runId) return;
       if (claimer !== null) {
         current = claimer.seat;
-        if (claimer.pong) {
-          // 碰牌者直接出牌（碰后不能和，须先打一张）
-          const r2 = await takeTurn(current, true);
-          if (r2 === 'hu') { /* 理论上不可达 */ }
-          continue;
-        }
+        if (claimer.pong) pendingPong = true;
       } else {
         current = (last.by + 1) % 4;
         if (!draw(st.players[current])) { endLiuju(); return; }
