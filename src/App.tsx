@@ -44,6 +44,7 @@ interface PlayerState {
   revealed: number[];    // 已亮出的赖子
   discards: number[];
   score: number;
+  lastDraw: number;      // 刚摸来的牌（-1 = 无；将头含赖子时不能用它配对）
 }
 
 interface HandResult {
@@ -132,6 +133,7 @@ export default function App() {
     lastDiscard: null as { by: number; tile: number } | null,
     handNo: 0,
     kongPts: [0, 0, 0, 0],
+    handStartScores: [] as number[], // 本局开场时的分数，用于结算显示单局输赢
   });
 
   const promptRef = useRef<Prompt>(null);
@@ -154,9 +156,9 @@ export default function App() {
     runIdRef.current++;
     setLog([]);
     const players: PlayerState[] = NAMES.map((name, i) => ({
-      name, isAI: i !== 0, hand: [], melds: [], revealed: [], discards: [], score: 0,
+      name, isAI: i !== 0, hand: [], melds: [], revealed: [], discards: [], score: 0, lastDraw: -1,
     }));
-    g.current = { players, wall: [], laiziFlip: -1, laizi: -1, dealer: Math.floor(Math.random() * 4), turn: 0, busy: true, lastDiscard: null, handNo: 0, kongPts: [0, 0, 0, 0] };
+    g.current = { players, wall: [], laiziFlip: -1, laizi: -1, dealer: Math.floor(Math.random() * 4), turn: 0, busy: true, lastDiscard: null, handNo: 0, kongPts: [0, 0, 0, 0], handStartScores: players.map(p => p.score) };
     force();
     playHand(runIdRef.current);
   }
@@ -165,23 +167,26 @@ export default function App() {
     const t = g.current.wall.shift();
     if (t === undefined) return false;
     p.hand.push(t);
+    p.lastDraw = t;
     return true;
   }
   function tailDraw(p: PlayerState): boolean {
     const t = g.current.wall.pop();
     if (t === undefined) return false;
     p.hand.push(t);
+    p.lastDraw = t;
     return true;
   }
 
   function findKong(p: PlayerState): number | null {
-    // 暗杠：手牌 4 张相同（赖子可当原牌参与）
+    const L = g.current.laizi;
+    // 暗杠：手牌 4 张相同（赖子不能参与杠：4张赖子不能暗杠，也不能拿真牌凑赖子杠）
     const counts = new Map<number, number>();
     for (const t of p.hand) counts.set(t, (counts.get(t) || 0) + 1);
-    for (const [t, n] of counts) if (n === 4) return t;
+    for (const [t, n] of counts) if (n === 4 && t !== L) return t;
     // 补杠：已有碰且手上有第 4 张
     for (const m of p.melds) {
-      if (m.type === 'pong' && p.hand.includes(m.tile)) return m.tile;
+      if (m.type === 'pong' && m.tile !== L && p.hand.includes(m.tile)) return m.tile;
     }
     return null;
   }
@@ -197,7 +202,7 @@ export default function App() {
 
   function huResult(p: PlayerState, seat: number): HandResult {
     const full = fullTiles(p);
-    const r = checkHu(huTiles(p), g.current.laizi)!;
+    const r = checkHu(huTiles(p), g.current.laizi, 0, p.lastDraw)!;
     const mult = (r.usedWild === 0 ? 2 : 1) * Math.pow(2, p.revealed.length);
     return { winner: seat, usedWild: r.usedWild, revealedCount: p.revealed.length, mult, handTiles: full, isLiuju: false };
   }
@@ -224,7 +229,7 @@ export default function App() {
     g.current.turn = seat;
     force();
 
-    const tryHu = () => checkHu(huTiles(p), g.current.laizi);
+    const tryHu = () => checkHu(huTiles(p), g.current.laizi, 0, p.lastDraw);
     // 碰牌后必须打出一张，不能碰完直接和
     let hu = justPonged ? null : tryHu();
 
@@ -429,8 +434,9 @@ export default function App() {
     const st = g.current;
     st.handNo++;
     st.kongPts = [0, 0, 0, 0];
+    st.handStartScores = st.players.map(p => p.score);
     st.wall = buildWall();
-    for (const p of st.players) { p.hand = []; p.melds = []; p.revealed = []; p.discards = []; }
+    for (const p of st.players) { p.hand = []; p.melds = []; p.revealed = []; p.discards = []; p.lastDraw = -1; }
     // 发牌
     for (let i = 0; i < 13; i++) for (let s = 0; s < 4; s++) st.players[s].hand.push(st.wall.shift()!);
     for (const p of st.players) p.hand.sort((a, b) => a - b);
@@ -631,11 +637,18 @@ export default function App() {
               </div>
               <div className="text-center text-amber-300 text-lg font-bold mb-3">倍数 ×{prompt.result.mult}</div>
               <div className="grid grid-cols-4 gap-1 text-center text-sm mb-3">
-                {g.current.players.map((p, i) => (
-                  <div key={i} className={i === prompt.result.winner ? 'text-amber-300 font-bold' : 'text-stone-400'}>
-                    <div>{p.name}</div><div>{p.score}</div>
-                  </div>
-                ))}
+                {g.current.players.map((p, i) => {
+                  const delta = p.score - (g.current.handStartScores[i] ?? p.score);
+                  return (
+                    <div key={i} className={i === prompt.result.winner ? 'text-amber-300 font-bold' : 'text-stone-400'}>
+                      <div>{p.name}</div>
+                      <div>{p.score}</div>
+                      <div className={`text-xs ${delta > 0 ? 'text-emerald-400' : delta < 0 ? 'text-red-400' : 'text-stone-500'}`}>
+                        本局 {delta > 0 ? '+' : ''}{delta}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
               {g.current.kongPts.some(v => v > 0) && (
                 <div className="text-center text-xs text-stone-400 mb-3">
@@ -710,7 +723,8 @@ function Tutorial({ open, onClose }: { open: boolean; onClose: () => void }) {
             <p>· <b className="text-stone-100">只能碰不能吃</b>；但别人打出你需要的第 4 张时可以<b className="text-stone-100">明杠</b>（手上需已有 3 张）。没有七对、十三幺等特殊牌型，和牌必须是「4 副面子 + 1 对将」。</p>
             <p>· <b className="text-stone-100">杠牌即时给分</b>，不论本局是否和牌：明杠由点炮方给 2 分；暗杠每家给 2 分；先碰后自己摸成杠（后杠/补杠）每家给 1 分。</p>
             <p>· 摸完牌后翻一张牌定赖子（如翻 5 万则 6 万是赖子，翻 9 则循环到 1）。<b className="text-stone-100">翻出的那张牌（赖子皮）全局只剩 3 张</b>：自己摸到 3 张可申报<b className="text-stone-100">暗杠</b>——按暗杠计分（每家 2 分），但只亮 3 张、<b className="text-stone-100">不从牌尾补牌</b>，申报完正常出牌；也可以不申报，直接当普通刻子和牌。碰了赖子皮则永远没有机会回头杠。</p>
-            <p>· 赖子有两种用法：<b className="text-stone-100">当原牌</b>用（不占名额），或当<b className="text-stone-100">万能牌</b>用——<b className="text-purple-300">和牌时最多只能用 1 张万能赖子</b>。</p>
+            <p>· 赖子有两种用法：<b className="text-stone-100">当原牌</b>用，或当<b className="text-stone-100">万能牌</b>用（补顺子/刻子）。<b className="text-purple-300">和牌牌面最多只能有 1 张赖子</b>：3 张赖子不作刻、4 张赖子不能暗杠、赖子+赖子不能成将；手上有第 2 张赖子只能亮出（亮出还加倍数）。两张真牌+1 赖子只能<b className="text-stone-100">和牌时</b>作刻，不能拿来杠。</p>
+            <p>· <b className="text-purple-300">赖子组将的限制</b>：将头含赖子时，赖子只能变<b className="text-stone-100">牌面已有的真牌</b>来组对——4 组+单张真牌，摸到赖子可以和；4 组+单张赖子，只有摸来的牌能让某张<b className="text-stone-100">原有</b>真牌单出来时才可和（例：4 组+赖子，摸 3 筒拆 456 筒出 6 筒成将 ✅；摸 1 万 ❌，牌面没有 1 万）。</p>
             <p>· <b className="text-purple-300">赖子不能打出，只能亮出</b>。轮到自己时，只要手上有赖子就可以选择<b className="text-purple-300">亮出</b>（有 2 个及以上可一次亮 2 个）：亮出的赖子放到桌面，并从牌尾补摸 1 张（类似杠牌）。4 个赖子可以全亮。注意：亮出唯一的赖子会失去万能牌，谨慎选择。</p>
             <p>· 只能<b className="text-stone-100">自摸</b>和牌，没有点炮；可以碰后补杠、暗杠，杠上开花有效；不能抢杠。</p>
             <p>· 牌墙摸完无人和牌则<b className="text-stone-100">流局作废</b>，庄家不下庄；谁和牌谁坐庄。</p>

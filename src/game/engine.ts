@@ -46,13 +46,7 @@ function partitionSets(c: number[], w: number, L: number): boolean {
   let first = -1;
   for (let i = 0; i < 27; i++) if (c[i] > 0 && i !== L) { first = i; break; }
   if (first === -1) {
-    // 只剩赖子：只能以「本身」组成刻子（万能必须搭配普通牌）
-    if (c[L] >= 3) {
-      c[L] -= 3;
-      const ok = partitionSets(c, w, L);
-      c[L] += 3;
-      return ok;
-    }
+    // 只剩赖子：赖子必须搭配普通牌（3张赖子不作刻由上层 c[L]≥2 禁止保证）
     return c[L] === 0;
   }
   const key = partKey(c, w);
@@ -100,19 +94,15 @@ function partitionSets(c: number[], w: number, L: number): boolean {
       c[L] += need.length;
     }
   }
-  // 三张赖子当本身的刻子
-  if (!ok && c[L] >= 3) {
-    c[L] -= 3;
-    ok = partitionSets(c, w, L);
-    c[L] += 3;
-  }
   memo.set(key, ok);
   if (memo.size > 100000) memo.clear();
   return ok;
 }
 
 // useWild: 0 或 1，表示允许当万能牌使用的赖子张数
-function canHuWithWild(c0: number[], laizi: number, useWild: number): boolean {
+// drawn = 刚摸来的那张牌（-1 表示未知/不适用）：
+// 将头含赖子时，与赖子配对的那张真牌不能是刚摸来的（赖子只能变「牌面已有的真牌」）
+function canHuWithWild(c0: number[], laizi: number, useWild: number, drawn: number): boolean {
   const c = c0.slice();
   const L = laizi;
   // 选将
@@ -122,8 +112,8 @@ function canHuWithWild(c0: number[], laizi: number, useWild: number): boolean {
       if (partitionSets(c, useWild, L)) { c[p] += 2; return true; }
       c[p] += 2;
     }
-    if (c[p] >= 1 && p !== L && useWild >= 1 && c[L] >= 1) {
-      // p + 赖子当万能 组成将
+    if (c[p] >= 1 && p !== L && p !== drawn && useWild >= 1 && c[L] >= 1) {
+      // p（牌面已有的真牌）+ 赖子当万能 组成将；p 不能是刚摸来的那张
       c[p] -= 1; c[L] -= 1;
       if (partitionSets(c, useWild - 1, L)) { c[p] += 1; c[L] += 1; return true; }
       c[p] += 1; c[L] += 1;
@@ -135,16 +125,20 @@ function canHuWithWild(c0: number[], laizi: number, useWild: number): boolean {
 // 14 张（等效）hand 是否可胡；返回 false 或 { usedWild: 0|1 }
 // kongs = 副露中杠的个数：每个杠物理占 4 张但只算 3 张牌权，
 // 所以带 k 个杠时物理张数 = 14 + k（听牌判定为 13 + k）
-export function checkHu(hand: number[], laizi: number, kongs = 0): { usedWild: number } | null {
+// drawn = 刚摸来的牌（将头规则用，见 canHuWithWild）
+export function checkHu(hand: number[], laizi: number, kongs = 0, drawn = -1): { usedWild: number } | null {
   if (hand.length !== 14 + kongs) return null;
   const c = toCounts(hand);
+  // 规则：和牌牌面最多 1 张赖子（无论当万能还是本身）；3 张赖子不作刻、赖子+赖子不成将
+  if (c[laizi] >= 2) return null;
   // 不带赖子胡（2 倍）：优先检查
-  if (canHuWithWild(c, laizi, 0)) return { usedWild: 0 };
-  if (canHuWithWild(c, laizi, 1)) return { usedWild: 1 };
+  if (canHuWithWild(c, laizi, 0, drawn)) return { usedWild: 0 };
+  if (canHuWithWild(c, laizi, 1, drawn)) return { usedWild: 1 };
   return null;
 }
 
 // 13 张（等效）是否听牌：返回可胡的牌列表及是否用赖子
+// 每张候选牌都按「刚摸来的是它」判定（赖子组将规则）
 export function tenpaiWaits(hand: number[], laizi: number, kongs = 0): { tile: number; usedWild: number }[] {
   const waits: { tile: number; usedWild: number }[] = [];
   if (hand.length !== 13 + kongs) return waits;
@@ -152,7 +146,7 @@ export function tenpaiWaits(hand: number[], laizi: number, kongs = 0): { tile: n
   for (let t = 0; t < 27; t++) {
     if (base[t] >= 4) continue;
     const h = hand.concat(t);
-    const r = checkHu(h, laizi, kongs); // 14 + kongs 物理张
+    const r = checkHu(h, laizi, kongs, t); // 14 + kongs 物理张，t 视为刚摸的
     if (r) waits.push({ tile: t, usedWild: r.usedWild });
   }
   return waits;
